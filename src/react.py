@@ -215,14 +215,14 @@ class FunctionalStateEnvironment:
     def __init__(
         self,
         states: List[str],
-        actions: Dict[int, str],
+        sm_actions: Dict[int, str],
         initial_state: str,
         transitions: List[Dict[str, Any]],
         state_handlers: Dict[str, Callable[[StateContext, Any], StateContext]],
     ):
         self._state_machine = StateMachineEnv(
             states=states,
-            actions=actions,
+            actions=sm_actions,
             initial_state=initial_state,
             transitions=transitions,
             observation_space=None,  # Define based on your needs
@@ -230,10 +230,10 @@ class FunctionalStateEnvironment:
         self._state_handlers = state_handlers
         self._context = StateContext(state=initial_state, data={}, observation=None)
 
-    def apply_action(self, action: int) -> StateContext:
+    def apply_sm_action(self, sm_action: int) -> StateContext:
         """Pure function to compute next state"""
         observation, reward, terminated, truncated, info = self._state_machine.step(
-            action
+            sm_action
         )
 
         # Get handler for current state
@@ -241,7 +241,7 @@ class FunctionalStateEnvironment:
 
         if handler:
             # Create new context immutably
-            new_context = handler(self._context, action)
+            new_context = handler(self._context, sm_action)
         else:
             new_context = StateContext(
                 state=info["state"], data=self._context.data, observation=observation
@@ -258,7 +258,7 @@ client = OpenAI()
 @dataclass(frozen=True)
 class ReactState:
     thought: Optional[str] = None
-    action: Optional[str] = None
+    lm_action: Optional[str] = None
     observation: Optional[str] = None
     context: Dict[str, Any] = field(default_factory=dict)
 
@@ -273,15 +273,15 @@ class ReactEnvironment(FunctionalStateEnvironment):
     def __init__(
         self,
         task_description: str,
-        available_actions: List[str],
+        available_lm_actions: List[str],
         observation_formatter: Callable[[str, Any], str],
     ):
-        # Initialize state machine with React states
+        # Initialize state machine with React states and SM actions
         super().__init__(
             states=["THINKING", "ACTING", "OBSERVING", "FINISHED"],
-            actions={
+            sm_actions={
                 0: "think",  # Generate thought
-                1: "act",  # Execute action
+                1: "act",    # Execute LM action
                 2: "observe",  # Process observation
             },
             initial_state="THINKING",
@@ -299,7 +299,7 @@ class ReactEnvironment(FunctionalStateEnvironment):
             },
         )
         self.task_description = task_description
-        self.available_actions = available_actions
+        self.available_lm_actions = available_lm_actions
         self.observation_formatter = observation_formatter
         
         # Initialize ReactContext instead of StateContext
@@ -315,7 +315,7 @@ class ReactEnvironment(FunctionalStateEnvironment):
         """Create prompt for thinking state"""
         prompt = f"Task: {self.task_description}\n\n"
         prompt += "Available actions:\n"
-        for action in self.available_actions:
+        for action in self.available_lm_actions:
             prompt += f"- {action}\n"
 
         prompt += "\nHistory:\n"
@@ -326,7 +326,7 @@ class ReactEnvironment(FunctionalStateEnvironment):
         prompt += "\nWhat should I do next? Express your reasoning."
         return prompt
 
-    def _handle_thinking(self, context: ReactContext, action: int) -> ReactContext:
+    def _handle_thinking(self, context: ReactContext, sm_action: int) -> ReactContext:
         """Generate next thought using LLM"""
         prompt = self._create_thinking_prompt(context)
 
@@ -339,7 +339,7 @@ class ReactEnvironment(FunctionalStateEnvironment):
 
         new_state = ReactState(
             thought=thought,  # Set the thought explicitly
-            action=None,
+            lm_action=None,
             observation=None,
             context=context.current.context
         )
@@ -353,18 +353,18 @@ class ReactEnvironment(FunctionalStateEnvironment):
         )
 
     def _create_acting_prompt(self, thought: str) -> str:
-        """Create prompt for action parsing"""
+        """Create prompt for LM action parsing"""
         prompt = f"""Based on this thought, what action should be taken?
-Available actions: {', '.join(self.available_actions)}
+Available LM actions: {', '.join(self.available_lm_actions)}
 
 Thought: {thought}
 
 Extract the most appropriate action from the thought. Return just the action name."""
         return prompt
 
-    def _handle_acting(self, context: ReactContext, action: int) -> ReactContext:
-        """Execute action based on thought"""
-        prompt = self._create_acting_prompt(context.current.thought)  # Use thought instead of context
+    def _handle_acting(self, context: ReactContext, sm_action: int) -> ReactContext:
+        """Execute LM action based on thought"""
+        prompt = self._create_acting_prompt(context.current.thought)
 
         try:
             response = client.chat.completions.create(
@@ -374,16 +374,16 @@ Extract the most appropriate action from the thought. Return just the action nam
             )
         except Exception as e:
             # Return to thinking state on error
-            return self._handle_thinking(context, action)
+            return self._handle_thinking(context, sm_action)
 
-        action_name = response.choices[0].message.content.strip()
+        lm_action_name = response.choices[0].message.content.strip()
 
-        if action_name not in self.available_actions:
-            return self._handle_thinking(context, action)
+        if lm_action_name not in self.available_lm_actions:
+            return self._handle_thinking(context, sm_action)
 
         new_state = ReactState(
             thought=context.current.thought,
-            action=action_name,  # Set the action explicitly
+            lm_action=lm_action_name,
             observation=None,
             context=context.current.context
         )
@@ -396,17 +396,17 @@ Extract the most appropriate action from the thought. Return just the action nam
             current=new_state
         )
 
-    def _handle_observing(self, context: ReactContext, action: int) -> ReactContext:
+    def _handle_observing(self, context: ReactContext, sm_action: int) -> ReactContext:
         """Process observation from environment"""
         # Get observation from environment
         observation = self.observation_formatter(
-            context.current.action,
+            context.current.lm_action,
             context.observation if context.observation else "no observation"
         )
 
         new_state = ReactState(
             thought=context.current.thought,
-            action=context.current.action,
+            lm_action=context.current.lm_action,
             observation=observation,  # Set the observation explicitly
             context=context.current.context
         )
@@ -419,14 +419,14 @@ Extract the most appropriate action from the thought. Return just the action nam
             current=new_state
         )
 
-    def _handle_finished(self, context: ReactContext, action: int) -> ReactContext:
+    def _handle_finished(self, context: ReactContext, sm_action: int) -> ReactContext:
         """Handle completion"""
         return context
 
-    def apply_action(self, action: int) -> ReactContext:
-        """Pure function to compute next state"""
+    def apply_sm_action(self, sm_action: int) -> ReactContext:
+        """Pure function to compute next state based on SM action"""
         # Execute the state machine transition first
-        observation, reward, terminated, truncated, info = self._state_machine.step(action)
+        observation, reward, terminated, truncated, info = self._state_machine.step(sm_action)
         
         # Update the context state based on the state machine's current state
         updated_context = ReactContext(
@@ -441,7 +441,7 @@ Extract the most appropriate action from the thought. Return just the action nam
         handler = self._state_handlers.get(updated_context.state)
 
         if handler:
-            new_context = handler(updated_context, action)
+            new_context = handler(updated_context, sm_action)
         else:
             new_context = updated_context
 
@@ -462,13 +462,13 @@ def example_usage():
     # Initialize environment
     env = ReactEnvironment(
         task_description="Find a red book on the shelf",
-        available_actions=["search[entity]", "lookup[string]", "finish[answer]"],
+        available_lm_actions=["search[entity]", "lookup[string]", "finish[answer]"],
         observation_formatter=lambda action, obs: f"Observed: {obs}",
     )
 
     # Run ReAct loop
     context = env._context
     while context.state != "FINISHED":
-        context = env.apply_action(0)  # Think
-        context = env.apply_action(1)  # Act
-        context = env.apply_action(2)  # Observe
+        context = env.apply_sm_action(0)  # Think
+        context = env.apply_sm_action(1)  # Act
+        context = env.apply_sm_action(2)  # Observe

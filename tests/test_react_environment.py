@@ -26,8 +26,7 @@ MOCK_ACTION_RESPONSE = {
 class TestReactEnvironment(unittest.TestCase):
     def setUp(self):
         """Setup that runs before each test"""
-        # Create the patcher
-        self.patcher = patch('src.single_file_env.client')  # Changed patch target
+        self.patcher = patch('src.react.client')
         self.mock_client = self.patcher.start()
         
         # Setup default response
@@ -40,7 +39,7 @@ class TestReactEnvironment(unittest.TestCase):
 
         self.env = ReactEnvironment(
             task_description="Find a red book on the shelf",
-            available_actions=["search[entity]", "lookup[string]", "finish[answer]"],
+            available_lm_actions=["search[entity]", "lookup[string]", "finish[answer]"],
             observation_formatter=mock_observation_formatter
         )
 
@@ -51,20 +50,18 @@ class TestReactEnvironment(unittest.TestCase):
     def test_environment_initialization(self):
         """Test that environment is properly initialized"""
         self.assertEqual(self.env.task_description, "Find a red book on the shelf")
-        self.assertIn("search[entity]", self.env.available_actions)
+        self.assertIn("search[entity]", self.env.available_lm_actions)
         self.assertEqual(self.env._context.state, "THINKING")
         self.assertIsInstance(self.env._context, ReactContext)
 
     def test_thinking_state(self):
         """Test the thinking state handler"""
-        # Setup specific response for thinking
         self.mock_client.chat.completions.create.return_value = Mock(
             choices=[Mock(message=Mock(content="I should search for the red book on the shelf first."))]
         )
         
         context = self.env._handle_thinking(self.env._context, 0)
         
-        # Verify OpenAI API was called
         self.mock_client.chat.completions.create.assert_called_once()
         call_args = self.mock_client.chat.completions.create.call_args[1]
         self.assertIn("Task: Find a red book on the shelf", call_args["messages"][0]["content"])
@@ -74,27 +71,23 @@ class TestReactEnvironment(unittest.TestCase):
 
     def test_acting_state(self):
         """Test the acting state handler"""
-        # Setup responses for both thinking and acting
         responses = [
             Mock(choices=[Mock(message=Mock(content="I should search for the red book on the shelf first."))]),
             Mock(choices=[Mock(message=Mock(content="search[entity]"))])
         ]
         self.mock_client.chat.completions.create.side_effect = responses
         
-        # First, get through thinking state
         context = self.env._handle_thinking(self.env._context, 0)
-        
-        # Then test acting state
         context = self.env._handle_acting(context, 1)
         
         self.assertEqual(context.state, "ACTING")
-        self.assertEqual(context.current.action, "search[entity]")
+        self.assertEqual(context.current.lm_action, "search[entity]")
 
     def test_observing_state(self):
         """Test the observing state handler"""
         initial_state = ReactState(
             thought="I should search for the red book",
-            action="search[entity]",
+            lm_action="search[entity]",
             context={"location": "shelf"}
         )
         context = ReactContext(
@@ -121,21 +114,20 @@ class TestReactEnvironment(unittest.TestCase):
         
         context = self.env._context
         
-        context = self.env.apply_action(0)
+        context = self.env.apply_sm_action(0)
         self.assertEqual(context.state, "THINKING")
         self.assertIsNotNone(context.current.thought)
         
-        context = self.env.apply_action(1)
+        context = self.env.apply_sm_action(1)
         self.assertEqual(context.state, "ACTING")
-        self.assertIsNotNone(context.current.action)
+        self.assertIsNotNone(context.current.lm_action)
         
-        context = self.env.apply_action(2)
+        context = self.env.apply_sm_action(2)
         self.assertEqual(context.state, "OBSERVING")
         self.assertIsNotNone(context.current.observation)
 
     def test_invalid_action_handling(self):
-        """Test handling of invalid actions"""
-        # Setup mock responses properly
+        """Test handling of invalid LM actions"""
         responses = [
             Mock(choices=[Mock(message=Mock(content="I should search"))]),
             Mock(choices=[Mock(message=Mock(content="invalid_action"))]),
@@ -157,13 +149,17 @@ class TestReactEnvironment(unittest.TestCase):
         self.assertIn("red book", formatted_obs)
 
     def test_action_space(self):
-        """Test that all actions in action space are valid"""
+        """Test that all SM actions in action space are valid"""
         for action in [0, 1, 2]:
             self.assertTrue(self.env.action_space.contains(action))
 
     def test_context_immutability(self):
         """Test that ReactContext maintains immutability"""
-        initial_state = ReactState(thought="initial thought", action=None, observation=None)
+        initial_state = ReactState(
+            thought="initial thought",
+            lm_action=None,
+            observation=None
+        )
         context = ReactContext(
             state="THINKING",
             data={},
@@ -179,7 +175,7 @@ class TestReactEnvironment(unittest.TestCase):
         """Test that history is properly maintained through state transitions"""
         context = self.env._context
         for _ in range(3):
-            context = self.env.apply_action(_)
+            context = self.env.apply_sm_action(_)
         
         self.assertGreater(len(context.history), 0)
         self.assertTrue(all(isinstance(state, ReactState) for state in context.history))
